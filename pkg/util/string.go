@@ -1,33 +1,49 @@
 package util
 
 import (
-	"math/rand"
+	"crypto/rand"
+	"encoding/hex"
+	"sync"
 )
 
-var randx = rand.NewSource(42)
+type SecureRandom struct {
+	mu sync.Mutex
+}
 
-// RandString returns a random string of length n.
-func RandString(n int) string {
-	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	const (
-		letterIdxBits = 6                    // 6 bits to represent a letter index
-		letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-		letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-	)
+func NewSecureRandom() *SecureRandom {
+	return &SecureRandom{}
+}
 
-	b := make([]byte, n)
-	// A rand.Int63() generates 63 random bits, enough for letterIdxMax letters!
-	for i, cache, remain := n-1, randx.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = randx.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
+func (sr *SecureRandom) GenerateHex(length int) (string, error) {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+
+	bytes := make([]byte, (length+1)/2)
+	
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
 	}
 
-	return string(b)
+	hexStr := hex.EncodeToString(bytes)
+
+	if len(hexStr) > length {
+		hexStr = hexStr[:length]
+	}
+
+	return hexStr, nil
+}
+
+func RandString(n int) string {
+	sr := NewSecureRandom()
+	hexStr, err := sr.GenerateHex(n)
+	if err != nil {
+		return "0000000000"
+	}
+	return hexStr
+}
+
+func BenchmarkGenerateHex(length int) string {
+	sr := NewSecureRandom()
+	hexStr, _ := sr.GenerateHex(length)
+	return hexStr
 }

@@ -1,28 +1,71 @@
 package httpsrv
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 
 type sessionStats struct {
 	id   string
-	sent int
+	sent int64
 }
 
-func (w *sessionStats) print() {
-	log.Printf("session %s has received %d messages\n", w.id, w.sent)
+type statsManager struct {
+	sessions map[string]*sessionStats
+	mu       sync.RWMutex
 }
 
-func (w *sessionStats) inc() {
-	w.sent++
+func newStatsManager() *statsManager {
+	return &statsManager{
+		sessions: make(map[string]*sessionStats),
+	}
+}
+
+func (sm *statsManager) increment(id string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	
+	if stats, exists := sm.sessions[id]; exists {
+		stats.sent++
+	} else {
+		sm.sessions[id] = &sessionStats{
+			id:   id,
+			sent: 1,
+		}
+	}
+}
+
+func (sm *statsManager) getStats(id string) *sessionStats {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	
+	if stats, exists := sm.sessions[id]; exists {
+		return &sessionStats{
+			id:   stats.id,
+			sent: stats.sent,
+		}
+	}
+	return nil
+}
+
+func (sm *statsManager) removeStats(id string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	
+	if stats, exists := sm.sessions[id]; exists {
+		log.Printf("session %s has received %d messages\n", stats.id, stats.sent)
+		delete(sm.sessions, id)
+	}
+}
+
+func (s *Server) initStats() {
+	s.stats = newStatsManager()
 }
 
 func (s *Server) incStats(id string) {
-	// Find and increment.
-	for _, ws := range s.sessionStats {
-		if ws.id == id {
-			ws.inc()
-			return
-		}
-	}
-	// Not found, add new.
-	s.sessionStats = append(s.sessionStats, sessionStats{id: id, sent: 1})
+	s.stats.increment(id)
+}
+
+func (s *Server) removeStats(id string) {
+	s.stats.removeStats(id)
 }

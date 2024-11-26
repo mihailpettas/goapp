@@ -6,77 +6,260 @@ import (
 )
 
 func (s *Server) handlerHome(w http.ResponseWriter, r *http.Request) {
-	template.Must(template.New("").Parse(`
+
+    w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+	token := s.setCSRFToken(w)
+
+	tmpl := template.Must(template.New("").Parse(`
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<script>  
-window.addEventListener("load", function(evt) {
-    var output = document.getElementById("output");
-    var input = document.getElementById("input");
-    var ws;
-    var print = function(message) {
-        var d = document.createElement("div");
-        d.textContent = message;
-        output.appendChild(d);
-        output.scroll(0, output.scrollHeight);
-    };
-    document.getElementById("open").onclick = function(evt) {
-        if (ws) {
-            return false;
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GoApp WebSocket Client</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 1rem;
+            background-color: #f5f5f5;
         }
-        ws = new WebSocket("{{.}}");
-        ws.onopen = function(evt) {
-            print("OPEN");
+        .container {
+            display: flex;
+            gap: 2rem;
+            margin-top: 2rem;
         }
-        ws.onclose = function(evt) {
-            print("CLOSE");
-            ws = null;
+        .controls {
+            flex: 1;
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-        ws.onmessage = function(evt) {
-            print("RESPONSE: " + evt.data);
+        .output-container {
+            flex: 2;
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-        ws.onerror = function(evt) {
-            print("ERROR: " + evt.data);
+        .button-group {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
         }
-        return false;
-    };
-    document.getElementById("send").onclick = function(evt) {
-        if (!ws) {
-            return false;
+        button {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.2s;
         }
-        print("SEND: " + input.value);
-        ws.send(input.value);
-        return false;
-    };
-    document.getElementById("close").onclick = function(evt) {
-        if (!ws) {
-            return false;
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
         }
-        ws.close();
-        return false;
-    };
-});
-</script>
+        #open {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #close {
+            background-color: #f44336;
+            color: white;
+        }
+        #send {
+            background-color: #2196F3;
+            color: white;
+        }
+        #output {
+            height: 70vh;
+            overflow-y: auto;
+            padding: 1rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fafafa;
+            font-family: monospace;
+        }
+        .message {
+            padding: 0.5rem;
+            margin: 0.25rem 0;
+            border-radius: 4px;
+        }
+        .message.sent {
+            background-color: #e3f2fd;
+        }
+        .message.received {
+            background-color: #f1f8e9;
+        }
+        .message.error {
+            background-color: #ffebee;
+        }
+        .hex-value {
+            font-family: monospace;
+            color: #2196F3;
+            font-weight: bold;
+        }
+        .status {
+            font-size: 0.875rem;
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+            background: #e8f5e9;
+        }
+        #connection-status {
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .connected {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .disconnected {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+    </style>
 </head>
 <body>
-<table>
-<tr><td valign="top" width="50%">
-<p>Click "Open" to create a connection to the server, 
-"Send" to send a message to the server and "Close" to close the connection. 
-You can change the message and send multiple times.
-<p>
-<form>
-<button id="open">Open</button>
-<button id="close">Close</button>
-<p><input id="input" type="text" value="{}">
-<button id="send">Reset</button>
-</form>
-</td><td valign="top" width="50%">
-<div id="output" style="max-height: 70vh;overflow-y: scroll;"></div>
-</td></tr></table>
+    <h1>GoApp WebSocket Client</h1>
+    <div class="container">
+        <div class="controls">
+            <div id="connection-status" class="disconnected">
+                Disconnected
+            </div>
+            <div class="button-group">
+                <button id="open">Connect</button>
+                <button id="close" disabled>Disconnect</button>
+            </div>
+            <form id="reset-form" onsubmit="return false;">
+                <button id="send" disabled>Reset Counter</button>
+            </form>
+            <div class="status">
+                Click "Connect" to start receiving hex values. 
+                Use "Reset Counter" to restart the counter from 0.
+            </div>
+        </div>
+        <div class="output-container">
+            <h2>Messages</h2>
+            <div id="output"></div>
+        </div>
+    </div>
+
+    <script>
+    window.addEventListener("load", function(evt) {
+        const output = document.getElementById("output");
+        const openBtn = document.getElementById("open");
+        const closeBtn = document.getElementById("close");
+        const sendBtn = document.getElementById("send");
+        const statusDiv = document.getElementById("connection-status");
+        let ws;
+
+        function updateConnectionStatus(connected) {
+            statusDiv.textContent = connected ? "Connected" : "Disconnected";
+            statusDiv.className = connected ? "connected" : "disconnected";
+            openBtn.disabled = connected;
+            closeBtn.disabled = !connected;
+            sendBtn.disabled = !connected;
+        }
+
+        function print(type, message) {
+            const msgDiv = document.createElement("div");
+            msgDiv.className = "message " + type;
+            msgDiv.textContent = message;
+            output.appendChild(msgDiv);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function formatResponse(data) {
+            try {
+                const response = JSON.parse(data);
+                return `Iteration: ${response.iteration}, Hex Value: `+
+                       `<span class="hex-value">${response.value}</span>`;
+            } catch (e) {
+                return data;
+            }
+        }
+
+        openBtn.onclick = function(evt) {
+            if (ws) {
+                return false;
+            }
+            ws = new WebSocket({{.wsURL}});
+
+            ws.onopen = function(evt) {
+                print("sent", "Connection established");
+                updateConnectionStatus(true);
+            }
+
+            ws.onclose = function(evt) {
+                print("sent", "Connection closed");
+                updateConnectionStatus(false);
+                ws = null;
+            }
+
+            ws.onmessage = function(evt) {
+                const msgDiv = document.createElement("div");
+                msgDiv.className = "message received";
+                msgDiv.innerHTML = formatResponse(evt.data);
+                output.appendChild(msgDiv);
+                output.scrollTop = output.scrollHeight;
+            }
+
+            ws.onerror = function(evt) {
+                print("error", "ERROR: " + evt.data);
+            }
+
+            return false;
+        };
+
+        closeBtn.onclick = function(evt) {
+            if (!ws) {
+                return false;
+            }
+            ws.close();
+            return false;
+        };
+
+        sendBtn.onclick = function(evt) {
+            if (!ws) {
+                return false;
+            }
+            print("sent", "Resetting counter");
+            ws.send("{}");
+            return false;
+        };
+
+        // Add CSRF token to all requests
+        const csrfToken = {{.csrfToken}};
+        if (csrfToken) {
+            const headers = new Headers({
+                'X-CSRF-Token': csrfToken
+            });
+        }
+    });
+    </script>
 </body>
 </html>
-`)).Execute(w, "ws://"+r.Host+"/goapp/ws")
+`))
+
+	data := struct {
+		wsURL     template.JS
+		csrfToken template.JS
+	}{
+		wsURL:     template.JS(`"ws://" + window.location.host + "/goapp/ws"`),
+		csrfToken: template.JS(`"` + token + `"`),
+	}
+
+	if err := tmpl.Execute(w, data); err != nil {
+		s.error(w, http.StatusInternalServerError, err)
+		return
+	}
 }

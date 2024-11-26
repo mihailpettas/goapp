@@ -1,19 +1,34 @@
 package httpsrv
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"goapp/internal/pkg/watcher"
 
 	"github.com/gorilla/websocket"
 )
 
+type wsMessage struct {
+	Iteration int    `json:"iteration"`
+	Value     string `json:"value"`
+}
+
 func (s *Server) handlerWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Create and start a watcher.
-	var watch = watcher.New()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	if !s.isValidOrigin(r.Header.Get("Origin")) {
+		s.error(w, http.StatusForbidden, fmt.Errorf("invalid origin"))
+		return
+	}
+
+	watch := watcher.New()
 	if err := watch.Start(); err != nil {
 		s.error(w, http.StatusInternalServerError, fmt.Errorf("failed to start watcher: %w", err))
 		return
@@ -23,73 +38,90 @@ func (s *Server) handlerWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.addWatcher(watch)
 	defer s.removeWatcher(watch)
 
-	// Start WS.
-	var upgrader = websocket.Upgrader{
+	upgrader := websocket.Upgrader{
+		HandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
-			return true
+			return s.isValidOrigin(r.Header.Get("Origin"))
 		},
 	}
 
-	c, err := upgrader.Upgrade(w, r, nil)
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		s.error(w, http.StatusInternalServerError, fmt.Errorf("failed to upgrade connection: %w", err))
+		s.error(w, http.StatusInternalServerError, fmt.Errorf("websocket upgrade failed: %w", err))
 		return
 	}
-	defer func() { _ = c.Close() }()
+	defer conn.Close()
 
-	log.Printf("websocket started for watcher %s\n", watch.GetWatcherId())
-	defer func() {
-		log.Printf("websocket stopped for watcher %s\n", watch.GetWatcherId())
-	}()
-
-	// Read done.
-	readDoneCh := make(chan struct{})
-
-	// All done.
-	doneCh := make(chan struct{})
-	defer close(doneCh)
+	conn.SetReadLimit(512)
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
 
 	go func() {
-		defer close(readDoneCh)
+		ticker := time.NewTicker(54 * time.Second)
+		defer ticker.Stop()
+
 		for {
 			select {
-			default:
-				_, p, err := c.ReadMessage()
-				if err != nil {
-					if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-						log.Printf("failed to read message: %v\n", err)
-					}
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
 					return
 				}
-				var m watcher.CounterReset
-				if err := json.Unmarshal(p, &m); err != nil {
-					log.Printf("failed to unmarshal message: %v\n", err)
-					continue
-				}
-				watch.ResetCounter()
-			case <-doneCh:
-				return
-			case <-s.quitChannel:
+			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 
-	for {
-		select {
-		case cv := <-watch.Recv():
-			data, _ := json.Marshal(cv)
-			err = c.WriteMessage(websocket.TextMessage, data)
+	go func() {
+		defer cancel()
+		for {
+			_, message, err := conn.ReadMessage()
 			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					log.Printf("failed to write message: %v\n", err)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+					log.Printf("websocket read error: %v", err)
 				}
 				return
 			}
-		case <-readDoneCh:
+
+			var reset watcher.CounterReset
+			if err := json.Unmarshal(message, &reset); err != nil {
+				log.Printf("invalid message format: %v", err)
+				continue
+			}
+
+			watch.ResetCounter()
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		case <-s.quitChannel:
-			return
+		case counter := <-watch.Recv():
+			msg := wsMessage{
+				Iteration: counter.Iteration,
+				Value:     counter.Value,
+			}
+
+			data, err := json.Marshal(msg)
+			if err != nil {
+				log.Printf("json marshal error: %v", err)
+				return
+			}
+
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					log.Printf("websocket write error: %v", err)
+				}
+				return
+			}
+
+			s.incStats(watch.GetWatcherId())
 		}
 	}
 }
